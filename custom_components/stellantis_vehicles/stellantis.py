@@ -13,6 +13,7 @@ from datetime import ( datetime, timedelta )
 import socket
 import random
 from typing import Any
+from time import monotonic
 
 from homeassistant.core import ( HomeAssistant, HassJob)
 from homeassistant.config_entries import ConfigEntry
@@ -69,7 +70,10 @@ from .const import (
     ABRP_API_KEY,
     TRANSLATION_PLACEHOLDERS,
     MQTT_TOKEN_RETRY_BACKOFF,
-    OAUTH_TOKEN_RETRY_BACKOFF
+    OAUTH_TOKEN_RETRY_BACKOFF,
+    FIELD_OAUTH_CODE_URL,
+    FIELD_STORED_LOGIN,
+    RELOGIN_MIN_INTERVAL
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -140,6 +144,11 @@ class StellantisBase:
         self.otp = None
         self._shutting_down = False
         self._pending_tasks: set[asyncio.Task] = set()
+        # Stellantis refresh tokens are single use: one refresh at a time.
+        self._oauth_refresh_lock = asyncio.Lock()
+        # The task holding that lock: its own requests must not wait for it.
+        self._oauth_refresh_task: asyncio.Task | None = None
+        self._last_relogin: float | None = None
 
         # Shared instance, already attached to the module loggers at import time.
         self.logger_filter = SENSITIVE_DATA_FILTER
@@ -276,10 +285,11 @@ class StellantisBase:
                         # short-lived blip right after a token rotation, so
                         # refresh the token once and retry the same request
                         # before surfacing an error.
-                        if not _retried and OAUTH_TOKEN_URL not in url:
+                        if not _retried and OAUTH_TOKEN_URL not in url and asyncio.current_task() is not self._oauth_refresh_task:
                             _LOGGER.debug("401 received, refreshing the OAuth token and retrying once")
                             try:
-                                await self.refresh_oauth_token_request()
+                                stale = (headers or {}).get("Authorization", "").removeprefix("Bearer ") or None
+                                await self.refresh_oauth_token_request(stale)
                             except (CommunicationError, RateLimitException) as refresh_err:
                                 # ConfigEntryAuthFailed (dead refresh token) is left
                                 # to propagate so Home Assistant starts reauth.
@@ -687,7 +697,32 @@ class StellantisVehicles(StellantisOauth):
 
     @log_call
     @rate_limit(6, 1800) # 6 per 30 min
-    async def refresh_oauth_token_request(self) -> None:
+    async def refresh_oauth_token_request(self, stale_access_token: str | None = None) -> None:
+        """Rotate the OAuth tokens, one refresh at a time.
+
+        Stellantis refresh tokens are single use: two refreshes racing with the
+        same token (the scheduled one and a 401 retry, say) leave the second
+        with invalid_grant and the account logged out. A caller that saw a
+        401 passes the access token it used, and skips its refresh when
+        another caller has already replaced it while it waited for the lock.
+        When the refresh token itself is revoked, log in again with the stored
+        credentials (if the user kept them) before giving up to reauth.
+        """
+        async with self._oauth_refresh_lock:
+            current = (self.get_config("oauth") or {}).get("access_token")
+            if stale_access_token is not None and current and current != stale_access_token:
+                _LOGGER.debug("OAuth tokens already rotated by another caller, skipping this refresh")
+                return
+            self._oauth_refresh_task = asyncio.current_task()
+            try:
+                await self._refresh_oauth_tokens()
+            except ConfigEntryAuthFailed:
+                if not await self._relogin_with_stored_credentials():
+                    raise
+            finally:
+                self._oauth_refresh_task = None
+
+    async def _refresh_oauth_tokens(self) -> None:
         # save_config() below rotates this out of the masked set before it
         # appears in the exchange log's request URL - register it separately.
         self.logger_filter.add_custom_value((self.get_config("oauth") or {}).get("refresh_token"))
@@ -707,6 +742,36 @@ class StellantisVehicles(StellantisOauth):
         if "id_token" in token_request:
             self.logger_filter.add_custom_value(token_request["id_token"])
         _log_http_exchange(url, headers, token_request)
+
+    async def _relogin_with_stored_credentials(self) -> bool:
+        """Get new OAuth tokens through the login service with the e-mail and
+        password the user chose to keep on the entry. True when it worked; at
+        most once every RELOGIN_MIN_INTERVAL. Caller holds _oauth_refresh_lock."""
+        login = self.get_config(FIELD_STORED_LOGIN) or {}
+        if not login.get("email") or not login.get("password"):
+            return False
+        now = monotonic()
+        if self._last_relogin is not None and now - self._last_relogin < RELOGIN_MIN_INTERVAL:
+            _LOGGER.warning("Refresh token revoked again within %ss of an automatic login, leaving it to reauth", RELOGIN_MIN_INTERVAL)
+            return False
+        self._last_relogin = now
+        _LOGGER.warning("Refresh token revoked, logging in again with the stored credentials")
+        try:
+            code_request = await self.get_oauth_code(login["email"], login["password"], self.get_config(FIELD_OAUTH_CODE_URL) or OAUTH_CODE_URL)
+            self.save_config({"oauth_code": code_request["code"]})
+            token_request = await self.get_access_token()
+            new_config = {
+                "access_token": token_request["access_token"],
+                "refresh_token": token_request["refresh_token"],
+                "expires_in": (get_datetime() + timedelta(seconds=int(token_request["expires_in"]))).isoformat()
+            }
+        except Exception as err:
+            _LOGGER.error("Automatic login with the stored credentials failed: %s", err)
+            return False
+        self.save_config({"oauth": new_config})
+        self.update_stored_config("oauth", new_config)
+        _LOGGER.warning("Logged in again with the stored credentials")
+        return True
 
     @log_call
     async def get_user_vehicles(self, force=False):

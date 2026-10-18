@@ -23,6 +23,8 @@ from .const import (
     FIELD_OAUTH_CODE,
     FIELD_OAUTH_CODE_URL,
     FIELD_REMOTE_COMMANDS,
+    FIELD_STORE_LOGIN,
+    FIELD_STORED_LOGIN,
     FIELD_SMS_CODE,
     FIELD_PIN_CODE,
     FIELD_NOTIFICATIONS,
@@ -56,7 +58,8 @@ def OAUTH_REMOTE_SCHEMA(default_oauth_code_url=None):
     return vol.Schema({
         vol.Required(CONF_EMAIL): str,
         vol.Required(CONF_PASSWORD): str,
-        vol.Optional(FIELD_OAUTH_CODE_URL, default=default_oauth_code_url or OAUTH_CODE_URL): str
+        vol.Optional(FIELD_OAUTH_CODE_URL, default=default_oauth_code_url or OAUTH_CODE_URL): str,
+        vol.Optional(FIELD_STORE_LOGIN, default=True): bool
     })
 
 def OTP_CONFIGURE_SCHEMA(default_remote_commands=False):
@@ -161,6 +164,9 @@ class StellantisVehiclesConfigFlow(ConfigFlow, domain=DOMAIN):
             return await self.async_step_oauth_mode()
 
         self.data.update({FIELD_OAUTH_CODE_URL: user_input.get(FIELD_OAUTH_CODE_URL, OAUTH_CODE_URL)})
+        # Kept (or cleared) for an automatic new login when Stellantis revokes the refresh token.
+        stored_login = {CONF_EMAIL: user_input[CONF_EMAIL], CONF_PASSWORD: user_input[CONF_PASSWORD]} if user_input.get(FIELD_STORE_LOGIN, True) else None
+        self.data.update({FIELD_STORED_LOGIN: stored_login})
         self.stellantis.save_config({"oauth_code": code_request["code"]})
         return await self.async_step_get_access_token()
 

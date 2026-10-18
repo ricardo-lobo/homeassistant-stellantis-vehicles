@@ -107,6 +107,13 @@ FIELD_OAUTH_MANUAL_MODE = "oauth_manual_mode"
 FIELD_OAUTH_CODE = "oauth_code"
 FIELD_OAUTH_CODE_URL = "oauth_code_url"
 FIELD_REMOTE_COMMANDS = "remote_commands"
+# Fork (ricardo-lobo): keep the login for an automatic new login when
+# Stellantis revokes the refresh token (see StellantisVehicles._relogin_with_stored_credentials).
+FIELD_STORE_LOGIN = "store_login"
+FIELD_STORED_LOGIN = "stored_login"
+# At most one automatic login per this many seconds, so a wrong password or a
+# changed login page ends in the normal reauth flow instead of a loop.
+RELOGIN_MIN_INTERVAL = 6 * 3600
 FIELD_SMS_CODE = "sms_code"
 FIELD_PIN_CODE = "pin_code"
 FIELD_NOTIFICATIONS = "notifications"

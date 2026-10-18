@@ -22,7 +22,11 @@
         "data": {
           "email": "Email",
           "password": "Password",
-          "oauth_code_url": "Login service URL"
+          "oauth_code_url": "Login service URL",
+          "store_login": "Keep the login to sign in again on its own"
+        },
+        "data_description": {
+          "store_login": "When Stellantis revokes the session, the integration logs in again through the login service above instead of asking you. The e-mail and password are stored in Home Assistant's config entry."
         }
       },
       "oauth_manual": {
